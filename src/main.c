@@ -779,7 +779,7 @@ void tcp_connected(socket_info_t *socket_info)
     ev.events = EPOLLIN;
     epoll_ctl(context.epollfd, EPOLL_CTL_MOD, tcp_socket, &ev);
 
-    if(write(tcp_socket, packet_buffer, qlen + 2) < qlen + 2)
+    if(send(tcp_socket, packet_buffer, qlen + 2, MSG_NOSIGNAL) < qlen + 2)
     {
         log_msg(LOG_ERROR, "TCP written too few bytes for qname %s.\n", dns_name2str(&lookup->key.name));
     }
