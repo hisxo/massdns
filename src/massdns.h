@@ -95,6 +95,12 @@ typedef struct
     size_t dedicated_resolver_index;
     lookup_key_t key;
     socket_info_t *socket;
+    bool use_tcp;
+    socket_info_t tcp_socket;
+    struct {
+        uint8_t *buffer;
+        size_t received;
+    } tcp_state;
 } lookup_t;
 
 typedef enum
@@ -114,6 +120,19 @@ typedef enum
     OUTPUT_LIST,
     OUTPUT_NDJSON
 } output_t;
+
+typedef enum
+{
+    LOOKUP_FAILURE_TIMEOUT,
+    LOOKUP_FAILURE_MAXRETRIES,
+    LOOKUP_FAILURE_NOFAILURE
+} lookup_failure_reason_t;
+
+const char *lookup_failure_text[] = {
+        "TIMEOUT",
+        "MAXRETRIES",
+        "IF YOU SEE THIS IN MASSDNS OUTPUT, FILE A BUG REPORT"
+};
 
 typedef enum {
     FILTER_DISABLED = 0,
@@ -190,6 +209,7 @@ typedef struct
         bool busypoll;
         bool extended_input;
         bool auto_concurrency;
+        bool tcp_enabled;
     } cmd_args;
 
     struct
@@ -218,8 +238,6 @@ typedef struct
     size_t fork_index;
     struct {
         bool enabled;
-        buffer_t ranges4;
-        buffer_t ranges6;
         struct sockaddr_storage src_range;
     } srcrand;
     struct

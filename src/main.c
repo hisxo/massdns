@@ -35,6 +35,7 @@
 #endif
 
 static char json_buffer[5 * 0xFFFF];
+static uint8_t packet_buffer[0x20000];
 
 void print_help()
 {
@@ -658,19 +659,6 @@ int hash_lookup_key(void *key)
 void end_warmup()
 {
     context.state = STATE_QUERYING;
-    if(!context.cmd_args.busypoll)
-    {
-        // Reduce our CPU load from epoll interrupts by removing the EPOLLOUT event
-#ifdef PCAP_SUPPORT
-        if(!context.pcap)
-#endif
-#ifdef HAVE_EPOLL
-        {
-            add_sockets(context.epollfd, EPOLLIN, EPOLL_CTL_MOD, &context.sockets.interfaces4);
-            add_sockets(context.epollfd, EPOLLIN, EPOLL_CTL_MOD, &context.sockets.interfaces6);
-        }
-#endif
-    }
 }
 
 void lookup_cleanup_dedicated_resolvers(lookup_t *lookup)
@@ -689,6 +677,7 @@ lookup_t *new_lookup(const char *qname, dns_record_type type)
         clean_exit(EXIT_FAILURE);
     }
     lookup_t *lookup = ((lookup_t**)context.lookup_pool.data)[--context.lookup_pool.len];
+    bzero(lookup, sizeof(*lookup));
 
     if(type != DNS_REC_PTR || !dns_ip2ptr(qname, &lookup->key.name))
     {
@@ -710,14 +699,6 @@ lookup_t *new_lookup(const char *qname, dns_record_type type)
         log_msg("Duplicate DNS name: %s\n", qname);
         goto fail;
     }
-    //bzero(value, sizeof(*value));
-    lookup->resolver = NULL;
-    lookup->dedicated_resolvers = NULL;
-    lookup->socket = NULL;
-    lookup->transaction = 0;
-    lookup->dedicated_resolver_index = 0;
-    lookup->ring_entry = NULL;
-    lookup->tries = 0;
 
     lookup->ring_entry = timed_ring_add(&context.ring, context.cmd_args.interval_ms * TIMED_RING_MS, lookup);
     urandom_get(&lookup->transaction, sizeof(lookup->transaction));
@@ -746,10 +727,123 @@ lookup_t *new_lookup(const char *qname, dns_record_type type)
     return NULL;
 }
 
+void tcp_close(lookup_t *lookup)
+{
+    if(!lookup->use_tcp || lookup->tcp_socket.descriptor <= 0)
+    {
+        return;
+    }
+    epoll_ctl(context.epollfd, EPOLL_CTL_DEL, lookup->tcp_socket.descriptor, NULL);
+    close(lookup->tcp_socket.descriptor);
+    lookup->tcp_state.received = 0;
+    lookup->tcp_socket.descriptor = -1;
+}
+
+void tcp_cleanup(lookup_t *lookup)
+{
+    free(lookup->tcp_state.buffer);
+    lookup->tcp_state.buffer = NULL;
+}
+
+void timeout_reset(lookup_t *lookup)
+{
+    timed_ring_remove(&context.ring, lookup->ring_entry);
+    lookup->ring_entry = timed_ring_add(&context.ring, context.cmd_args.interval_ms * TIMED_RING_MS, lookup);
+}
+
+void tcp_connected(socket_info_t *socket_info)
+{
+    lookup_t *lookup = socket_info->data;
+    int tcp_socket = socket_info->descriptor;
+
+    timeout_reset(lookup);
+
+    uint16_t qlen = dns_question_create_from_name(packet_buffer + 2, &lookup->key.name, lookup->key.type,
+                                                  lookup->transaction);
+    dns_buf_set_rd(packet_buffer + 2, !context.cmd_args.norecurse);
+    *((uint16_t*)packet_buffer) = htons(qlen);
+
+    struct epoll_event ev;
+    bzero(&ev, sizeof(ev));
+    ev.data.ptr = &lookup->tcp_socket;
+    ev.events = EPOLLIN;
+    epoll_ctl(context.epollfd, EPOLL_CTL_MOD, tcp_socket, &ev);
+
+    if(write(tcp_socket, packet_buffer, qlen + 2) < qlen + 2)
+    {
+        fprintf(stderr, "TCP written too few bytes.\n");
+    }
+    shutdown(tcp_socket, SHUT_WR);
+}
+
+void srcrand_random_addr(struct sockaddr_in6 *addr)
+{
+    memcpy(addr, &context.srcrand.src_range, sizeof(*addr));
+    uint8_t prefix = addr->sin6_port;
+    uint8_t random_trailing_bytes = (128 - prefix) / 8;
+    if(random_trailing_bytes < 16)
+    {
+        uint8_t random_byte;
+        urandom_get(&random_byte, sizeof(random_byte));
+        uint16_t random_bits = (128 - prefix) % 8;
+        addr->sin6_addr.s6_addr[16 - random_trailing_bytes - 1] ^= (random_byte & ((1 << random_bits) - 1));
+    }
+    urandom_get(16 - random_trailing_bytes + addr->sin6_addr.s6_addr, random_trailing_bytes);
+}
+
+void tcp_connect(lookup_t *lookup)
+{
+    int tcp_socket = socket(lookup->resolver->address.ss_family, SOCK_STREAM, 0);
+    if(tcp_socket < 0)
+    {
+        log_msg("Failed to create TCP socket: %s\n", strerror(errno));
+        return;
+    }
+
+    // Make socket non-blocking
+    int flags = fcntl(tcp_socket, F_GETFL, 0);
+    fcntl(tcp_socket, F_SETFL, flags | O_NONBLOCK);
+
+    if(context.srcrand.enabled && lookup->resolver->address.ss_family == AF_INET6)
+    {
+        const int enable = 1;
+        if (setsockopt(tcp_socket, SOL_IP, IP_FREEBIND, &enable, sizeof(enable)) == 0)
+        {
+            struct sockaddr_in6 src_addr;
+            srcrand_random_addr(&src_addr);
+            if(bind(tcp_socket, &src_addr, sizeof(src_addr)) != 0)
+            {
+                log_msg("Failed to bind TCP socket: %s\n", strerror(errno));
+            }
+        }
+        else
+        {
+            log_msg("Failed to set FREEBIND option on TCP socket: %s\n", strerror(errno));
+        }
+    }
+
+    connect(tcp_socket, (struct sockaddr*)&lookup->resolver->address, sockaddr_storage_size(&lookup->resolver->address));
+
+    bzero(&lookup->tcp_socket, sizeof(lookup->tcp_socket));
+    lookup->tcp_socket.descriptor = tcp_socket;
+    lookup->tcp_socket.type = SOCKET_TYPE_QUERY_TCP;
+    lookup->tcp_socket.data = lookup;
+    if(lookup->tcp_state.buffer == NULL)
+    {
+        lookup->tcp_state.buffer = safe_malloc(0x10001);
+    }
+    lookup->tcp_state.received = 0;
+
+    struct epoll_event ev;
+    bzero(&ev, sizeof(ev));
+    ev.data.ptr = &lookup->tcp_socket;
+    ev.events = EPOLLIN | EPOLLOUT;
+    epoll_ctl(context.epollfd, EPOLL_CTL_ADD, tcp_socket, &ev);
+}
+
 void send_query(lookup_t *lookup)
 {
-    static uint8_t buffer[0x200];
-    uint8_t *query_buffer = buffer;
+    uint8_t *query_buffer = packet_buffer;
 
     // Choose random resolver
     // Pool of resolvers cannot be empty due to check after parsing resolvers.
@@ -768,6 +862,14 @@ void send_query(lookup_t *lookup)
         {
             lookup->resolver = ((resolver_t *) context.resolvers.data) + urandom_size_t() % context.resolvers.len;
         }
+    }
+
+
+    if(lookup->use_tcp)
+    {
+        tcp_close(lookup);
+        tcp_connect(lookup);
+        return;
     }
 
     // We need to select the correct socket pool: IPv4 socket pool for IPv4 resolver/IPv6 socket pool for IPv6 resolver
@@ -794,13 +896,8 @@ void send_query(lookup_t *lookup)
        query_buffer += 48;
     }
 
-    ssize_t result = dns_question_create_from_name(query_buffer, &lookup->key.name, lookup->key.type,
-                                                   lookup->transaction);
-    if (result < DNS_PACKET_MINIMUM_SIZE)
-    {
-        log_msg("Failed to create DNS question for query \"%s\".", dns_name2str(&lookup->key.name));
-        return;
-    }
+    uint16_t qlen = dns_question_create_from_name(query_buffer, &lookup->key.name, lookup->key.type,
+                                                lookup->transaction);
 
     // Set or unset the QD bit based on user preference
     dns_buf_set_rd(query_buffer, !context.cmd_args.norecurse);
@@ -810,32 +907,22 @@ void send_query(lookup_t *lookup)
 
     if(context.srcrand.enabled && lookup->resolver->address.ss_family == AF_INET6)
     {
-        struct sockaddr_in6* addr = (struct sockaddr_in6*)&context.srcrand.src_range;
-        uint8_t prefix = addr->sin6_port;
-        uint8_t random_trailing_bytes = (128 - prefix) / 8;
-        if(random_trailing_bytes < 16)
-        {
-            uint8_t random_byte;
-            urandom_get(&random_byte, sizeof(random_byte));
-            uint16_t random_bits = (128 - prefix) % 8;
-            addr->sin6_addr.s6_addr[16 - random_trailing_bytes - 1] ^= (random_byte & ((1 << random_bits) - 1));
-        }
-        urandom_get(16 - random_trailing_bytes + addr->sin6_addr.s6_addr, random_trailing_bytes);
+        srcrand_random_addr((struct sockaddr_in6*)&context.srcrand.src_range);
         dst_buffer = *((struct sockaddr_in6*)&lookup->resolver->address);
         dst_buffer.sin6_port = 0;
         dst = (struct sockaddr*)&dst_buffer;
-        write_raw_header(buffer, (size_t)result, &context.srcrand.src_range, &lookup->resolver->address);
-        result += 48;
+        write_raw_header(packet_buffer, qlen, &context.srcrand.src_range, &lookup->resolver->address);
+        qlen += 48;
     }
     
     errno = 0;
-    ssize_t sent = sendto(lookup->socket->descriptor, buffer, (size_t) result, 0,dst,
+    ssize_t sent = sendto(lookup->socket->descriptor, packet_buffer, qlen, 0, dst,
                           sockaddr_storage_size(&lookup->resolver->address));
-    if(sent != result)
+    if(sent != qlen)
     {
         if(errno != EAGAIN && errno != EWOULDBLOCK)
         {
-            log_msg("Error sending: %s\n", strerror(errno));
+            log_msg("Error sending on FD %d for query %s: %s\n", lookup->socket->descriptor, dns_name2str(&lookup->key.name), strerror(errno));
         }
     }
 }
@@ -1120,7 +1207,7 @@ bool is_unacceptable(dns_pkt_t *packet)
     return context.cmd_args.retry_codes[packet->head.header.rcode];
 }
 
-void write_exhausted_tries(lookup_t *lookup, char *status)
+void write_exhausted_tries(lookup_t *lookup, const char *status)
 {
     if(context.cmd_args.output == OUTPUT_NDJSON && context.format.write_exhausted_tries) {
         json_escape_str(json_buffer, sizeof(json_buffer), dns_name2str(&lookup->key.name));
@@ -1133,6 +1220,9 @@ void write_exhausted_tries(lookup_t *lookup, char *status)
 void lookup_done(lookup_t *lookup)
 {
     context.stats.finished++;
+
+    tcp_close(lookup);
+    tcp_cleanup(lookup);
 
     hashmapRemove(context.map, &lookup->key);
 
@@ -1150,16 +1240,22 @@ void lookup_done(lookup_t *lookup)
     }
 }
 
-bool retry(lookup_t *lookup)
+bool retry(lookup_t *lookup, lookup_failure_reason_t failure_reason)
 {
-    context.stats.timeouts[lookup->tries]--;
-    context.stats.timeouts[++lookup->tries]++;
+    if(failure_reason != LOOKUP_FAILURE_NOFAILURE)
+    {
+        context.stats.timeouts[lookup->tries]--;
+        context.stats.timeouts[++lookup->tries]++;
+    }
     if(lookup->tries < context.cmd_args.resolve_count)
     {
         lookup->ring_entry = timed_ring_add(&context.ring, context.cmd_args.interval_ms * TIMED_RING_MS, lookup);
         send_query(lookup);
         return true;
     }
+    write_exhausted_tries(lookup, lookup_failure_text[failure_reason]);
+    // If this is the case, we will not try again.
+    lookup_done(lookup);
     return false;
 }
 
@@ -1175,11 +1271,7 @@ void ring_timeout(void *param)
 
     lookup_t *lookup = param;
     context.stats.numtimeouts++;
-    if(!retry(lookup))
-    {
-        write_exhausted_tries(lookup, "TIMEOUT");
-        lookup_done(lookup);
-    }
+    retry(lookup, LOOKUP_FAILURE_TIMEOUT);
 }
 
 void do_read(uint8_t *offset, size_t len, struct sockaddr_storage *recvaddr)
@@ -1229,15 +1321,17 @@ void do_read(uint8_t *offset, size_t len, struct sockaddr_storage *recvaddr)
     if(is_unacceptable(&packet))
     {
         // We may have tried to many times already.
-        if(!retry(lookup))
-        {
-            write_exhausted_tries(lookup, "MAXRETRIES");
-            // If this is the case, we will not try again.
-            lookup_done(lookup);
-        }
+        retry(lookup, LOOKUP_FAILURE_MAXRETRIES);
     }
     else
     {
+        if(packet.head.header.tc && context.cmd_args.tcp_enabled)
+        {
+            lookup->use_tcp = true;
+            retry(lookup, LOOKUP_FAILURE_NOFAILURE);
+            return;
+        }
+
         // We are done with the lookup because we received an acceptable reply.
         context.stats.finished_success++;
         context.stats.final_rcodes[packet.head.header.rcode]++;
@@ -1374,8 +1468,8 @@ void do_read(uint8_t *offset, size_t len, struct sockaddr_storage *recvaddr)
                 {
                     json_flags[written - 1] = 0;
                 }
-                fprintf(context.outfile, "%s],\"resolver\":\"%s\"}\n", json_flags,
-                        sockaddr2str(recvaddr));
+                fprintf(context.outfile, "%s],\"resolver\":\"%s\",\"proto\":\"%s\"}\n", json_flags,
+                        sockaddr2str(recvaddr), lookup->use_tcp ? "TCP" : "UDP");
 
                 break;
 
@@ -1463,12 +1557,37 @@ void do_read(uint8_t *offset, size_t len, struct sockaddr_storage *recvaddr)
         }
 
         lookup_done(lookup);
-        
+
         // Sometimes, users may want to obtain results immediately.
         if(context.cmd_args.flush)
         {
             fflush(context.outfile);
         }
+    }
+}
+
+
+void tcp_can_read(socket_info_t *socket_info)
+{
+    lookup_t *lookup = socket_info->data;
+    int tcp_socket = socket_info->descriptor;
+    ssize_t numread = read(tcp_socket, lookup->tcp_state.buffer + lookup->tcp_state.received, 0x10001 - lookup->tcp_state.received);
+    if(numread < 0)
+    {
+        return;
+    }
+
+    timeout_reset(lookup);
+
+    lookup->tcp_state.received += numread;
+    if(lookup->tcp_state.received < 2)
+    {
+        return;
+    }
+    uint16_t dns_len = htons(*((uint16_t*)lookup->tcp_state.buffer));
+    if(lookup->tcp_state.received >= dns_len + 2)
+    {
+        do_read(lookup->tcp_state.buffer + 2, dns_len, &lookup->resolver->address);
     }
 }
 
@@ -1893,14 +2012,7 @@ void run()
         ((lookup_t**)context.lookup_pool.data)[i] = context.lookup_space + i;
     }
 
-    timed_ring_init(&context.ring, max(context.cmd_args.interval_ms, 1000), 2 * TIMED_RING_MS, context.cmd_args.timed_ring_buckets);
-
-#ifdef HAVE_EPOLL
-    uint32_t socket_events = EPOLLOUT;
-
-    struct epoll_event pevents[100000];
-    bzero(pevents, sizeof(pevents));
-#endif
+    timed_ring_init(&context.ring, max(context.cmd_args.interval_ms, 10000), 2 * TIMED_RING_MS, context.cmd_args.timed_ring_buckets);
 
     init_pipes();
     context.pids = safe_calloc(context.cmd_args.num_processes * sizeof(*context.pids));
@@ -1918,11 +2030,6 @@ void run()
         pcap_setup();
     }
     else
-#endif
-#ifdef HAVE_EPOLL
-    {
-        socket_events |= EPOLLIN;
-    }
 #endif
     if(context.cmd_args.num_processes > 1)
     {
@@ -1987,8 +2094,8 @@ void run()
 #ifdef HAVE_EPOLL
     if(!context.cmd_args.busypoll)
     {
-        add_sockets(context.epollfd, socket_events, EPOLL_CTL_ADD, &context.sockets.interfaces4);
-        add_sockets(context.epollfd, socket_events, EPOLL_CTL_ADD, &context.sockets.interfaces6);
+        add_sockets(context.epollfd, EPOLLIN, EPOLL_CTL_ADD, &context.sockets.interfaces4);
+        add_sockets(context.epollfd, EPOLLIN, EPOLL_CTL_ADD, &context.sockets.interfaces6);
     }
 #endif
     if(context.cmd_args.busypoll)
@@ -2004,6 +2111,14 @@ void run()
     if(!context.cmd_args.busypoll)
     {
 #ifdef HAVE_EPOLL
+        struct epoll_event pevents[100000];
+        bzero(pevents, sizeof(pevents));
+
+        for(size_t i = 0; i < context.cmd_args.hashmap_size; i++)
+        {
+            can_send();
+        }
+
         while(context.state < STATE_DONE)
         {
 
@@ -2021,6 +2136,14 @@ void run()
                 for (int i = 0; i < ready; i++)
                 {
                     socket_info_t *socket_info = pevents[i].data.ptr;
+                    if ((pevents[i].events & EPOLLOUT) && socket_info->type == SOCKET_TYPE_QUERY_TCP)
+                    {
+                        tcp_connected(socket_info);
+                    }
+                    if ((pevents[i].events & EPOLLIN) && socket_info->type == SOCKET_TYPE_QUERY_TCP)
+                    {
+                        tcp_can_read(socket_info);
+                    }
                     if ((pevents[i].events & EPOLLOUT) && socket_info->type == SOCKET_TYPE_QUERY)
                     {
                         can_send();
@@ -2172,6 +2295,10 @@ void parse_cmd(int argc, char **argv)
             print_help();
             clean_exit(EXIT_SUCCESS);
         }
+        else if (strcmp(argv[i], "--tcp-enabled") == 0)
+        {
+            context.cmd_args.tcp_enabled = true;
+        }
         else if (strcmp(argv[i], "--busypoll") == 0 || strcmp(argv[i], "--busy-poll") == 0)
         {
             context.cmd_args.busypoll = true;
@@ -2284,6 +2411,7 @@ void parse_cmd(int argc, char **argv)
 
             // We abuse the port field to hold the prefix length.
             addr->sin6_port = prefix;
+            addr->sin6_family = AF_INET6;
         }
 #endif
         else if (strcmp(argv[i], "--outfile") == 0 || strcmp(argv[i], "-w") == 0)

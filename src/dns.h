@@ -1014,17 +1014,20 @@ ssize_t dns_str2namebuf(const char *name, uint8_t *buffer)
     return total_len + 1;
 }
 
-ssize_t dns_question_create_from_name(uint8_t *buffer, dns_name_t *name, dns_record_type type, uint16_t id)
+uint16_t dns_question_create_from_name(uint8_t *buffer, dns_name_t *name, dns_record_type type, uint16_t id)
 {
     static uint8_t *aftername;
 
-    memcpy(buffer + 12, name->name, name->length);
-    aftername = buffer + 12 + name->length;
     dns_buffer_set_id(buffer, id);
     *((uint16_t *) (buffer + 2)) = 0;
+    *((uint16_t *) (buffer + 4)) = htons(1);
+    *((uint16_t *) (buffer + 6)) = 0;
+    *((uint16_t *) (buffer + 8)) = 0;
+    *((uint16_t *) (buffer + 10)) = 0;
+    memcpy(buffer + 12, name->name, name->length);
+    aftername = buffer + 12 + name->length;
     *((uint16_t *) aftername) = htons(type);
     *((uint16_t *) (aftername + 2)) = htons(DNS_CLS_IN);
-    *((uint16_t *) (buffer + 4)) = htons(0x0001);
     return aftername + 4 - buffer;
 }
 

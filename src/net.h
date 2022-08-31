@@ -22,6 +22,7 @@ typedef enum
 {
     SOCKET_TYPE_INTERFACE,
     SOCKET_TYPE_QUERY,
+    SOCKET_TYPE_QUERY_TCP,
     SOCKET_TYPE_CONTROL
 } socket_type_t;
 
