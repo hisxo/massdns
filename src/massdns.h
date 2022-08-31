@@ -22,9 +22,15 @@
 #include "dns.h"
 #include "timed_ring.h"
 
-#define MAXIMUM_MODULE_COUNT 0xFF
 #define COMMON_UNPRIVILEGED_USER "nobody"
 #define COMMON_UNPRIVILEGED_GROUP "nogroup"
+
+#define LOG_DEBUG 0
+#define LOG_INFO 1
+#define LOG_WARN 2
+#define LOG_ERROR 3
+
+#define LOGLEVEL LOG_WARN
 
 const uint32_t OUTPUT_BINARY_VERSION = 0x00;
 

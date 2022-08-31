@@ -249,7 +249,10 @@ void cleanup()
     free(context.done);
 }
 
-void log_msg(const char* format, ...)
+// Allow the compiler to optimize out the logging
+#define log_msg(loglevel, ...) if((loglevel) >= LOGLEVEL) log_msg_helper(__VA_ARGS__)
+
+void log_msg_helper(const char* format, ...)
 {
     if(context.logfile != stderr)
     {
@@ -300,7 +303,7 @@ int hash_address(void *param)
     }
     else
     {
-        log_msg("Unsupported address for hashing.\n");
+        log_msg(LOG_ERROR, "Unsupported address for hashing.\n");
         abort();
     }
 
@@ -343,7 +346,7 @@ buffer_t massdns_resolvers_from_file(char *filename)
     FILE *f = fopen(filename, "r");
     if (f == NULL)
     {
-        log_msg("Failed to open resolver file: %s\n", strerror(errno));
+        log_msg(LOG_ERROR, "Failed to open resolver file: %s\n", strerror(errno));
         clean_exit(EXIT_FAILURE);
     }
     single_list_t *list = single_list_new();
@@ -363,12 +366,12 @@ buffer_t massdns_resolvers_from_file(char *filename)
                 }
                 else
                 {
-                    log_msg("No query socket for resolver \"%s\" found.\n", line);
+                    log_msg(LOG_ERROR, "No query socket for resolver \"%s\" found.\n", line);
                 }
             }
             else
             {
-                log_msg("\"%s\" is not a valid resolver. Skipped.\n", line);
+                log_msg(LOG_ERROR, "\"%s\" is not a valid resolver. Skipped.\n", line);
             }
         }
     }
@@ -376,7 +379,7 @@ buffer_t massdns_resolvers_from_file(char *filename)
     buffer_t resolvers = single_list_to_array_copy(list, sizeof(resolver_t));
     if(single_list_count(list) == 0)
     {
-        log_msg("No usable resolvers were found. Terminating.\n");
+        log_msg(LOG_ERROR, "No usable resolvers were found. Terminating.\n");
         clean_exit(EXIT_FAILURE);
     }
 
@@ -385,7 +388,7 @@ buffer_t massdns_resolvers_from_file(char *filename)
         context.resolver_map = hashmapCreate(resolvers.len, hash_address, addresses_equal);
         if(!context.resolver_map)
         {
-            log_msg("Failed to create resolver lookup map: %s\n", strerror(errno));
+            log_msg(LOG_ERROR, "Failed to create resolver lookup map: %s\n", strerror(errno));
             abort();
         }
 
@@ -397,7 +400,7 @@ buffer_t massdns_resolvers_from_file(char *filename)
             hashmapPut(context.resolver_map, &resolver->address, resolver);
             if (errno != 0)
             {
-                log_msg("Error putting resolver into hashmap: %s\n", strerror(errno));
+                log_msg(LOG_ERROR, "Error putting resolver into hashmap: %s\n", strerror(errno));
                 abort();
             }
         }
@@ -456,19 +459,19 @@ void resolvers_from_line(char *line, char **qname, dedicated_resolvers_t **resol
                     hashmapPut(context.resolver_map, &resolver->address, resolver);
                     if (errno != 0)
                     {
-                        log_msg("Error putting resolver into hashmap: %s\n", strerror(errno));
+                        log_msg(LOG_ERROR, "Error putting resolver into hashmap: %s\n", strerror(errno));
                         abort();
                     }
                 }
             }
             else
             {
-                log_msg("No query socket for dedicated resolver \"%s\" found.\n", token);
+                log_msg(LOG_ERROR, "No query socket for dedicated resolver \"%s\" found.\n", token);
             }
         }
         else
         {
-            log_msg("\"%s\" is not a valid resolver. Skipped.\n", token);
+            log_msg(LOG_ERROR, "\"%s\" is not a valid resolver. Skipped.\n", token);
         }
     }
     extend_resolver_buffer(resolvers, resolver_storage, i);
@@ -480,7 +483,7 @@ void set_sndbuf(int fd)
     if(context.cmd_args.sndbuf
         && setsockopt(fd, SOL_SOCKET, SO_SNDBUF, &context.cmd_args.sndbuf, sizeof(context.cmd_args.sndbuf)) != 0)
     {
-        log_msg("Failed to adjust send buffer size: %s\n", strerror(errno));
+        log_msg(LOG_ERROR, "Failed to adjust send buffer size: %s\n", strerror(errno));
     }
 }
 
@@ -489,7 +492,7 @@ void set_rcvbuf(int fd)
     if(context.cmd_args.rcvbuf
         && setsockopt(fd, SOL_SOCKET, SO_RCVBUF, &context.cmd_args.rcvbuf, sizeof(context.cmd_args.rcvbuf)) != 0)
     {
-        log_msg("Failed to adjust receive buffer size: %s\n", strerror(errno));
+        log_msg(LOG_ERROR, "Failed to adjust receive buffer size: %s\n", strerror(errno));
     }
 }
 
@@ -529,7 +532,7 @@ void add_default_socket(int version)
     return;
 
     error:
-        log_msg("Failed to create IPv%d socket: %s\n", version, strerror(errno));
+        log_msg(LOG_ERROR, "Failed to create IPv%d socket: %s\n", version, strerror(errno));
 }
 
 void set_user_sockets(single_list_t *bind_addrs, buffer_t *buffer)
@@ -547,7 +550,7 @@ void set_user_sockets(single_list_t *bind_addrs, buffer_t *buffer)
             info.type = SOCKET_TYPE_QUERY;
             if(bind(info.descriptor, (struct sockaddr*)addr, sizeof(*addr)) != 0)
             {
-                log_msg("Not adding socket %s due to bind failure: %s\n", sockaddr2str(addr), strerror(errno));
+                log_msg(LOG_ERROR, "Not adding socket %s due to bind failure: %s\n", sockaddr2str(addr), strerror(errno));
             }
             else
             {
@@ -558,7 +561,7 @@ void set_user_sockets(single_list_t *bind_addrs, buffer_t *buffer)
         }
         else
         {
-            log_msg("Failed to create IPv%d socket: %s\n", info.protocol, strerror(errno));
+            log_msg(LOG_ERROR, "Failed to create IPv%d socket: %s\n", info.protocol, strerror(errno));
         }
         free(element->data);
     }
@@ -673,7 +676,7 @@ lookup_t *new_lookup(const char *qname, dns_record_type type)
 {
     if(context.lookup_pool.len == 0)
     {
-        log_msg("Empty lookup pool.\n");
+        log_msg(LOG_ERROR, "Empty lookup pool.\n");
         clean_exit(EXIT_FAILURE);
     }
     lookup_t *lookup = ((lookup_t**)context.lookup_pool.data)[--context.lookup_pool.len];
@@ -684,7 +687,7 @@ lookup_t *new_lookup(const char *qname, dns_record_type type)
         ssize_t name_length = dns_str2namebuf(qname, lookup->key.name.name);
         if(name_length < 0)
         {
-            log_msg("Illegal DNS name: %s\n", qname);
+            log_msg(LOG_ERROR, "Illegal DNS name: %s\n", qname);
             goto fail;
         }
         else
@@ -696,7 +699,7 @@ lookup_t *new_lookup(const char *qname, dns_record_type type)
     lookup->key.type = type;
     if(hashmapGet(context.map, &lookup->key) != NULL)
     {
-        log_msg("Duplicate DNS name: %s\n", qname);
+        log_msg(LOG_ERROR, "Duplicate DNS name: %s\n", qname);
         goto fail;
     }
 
@@ -707,7 +710,7 @@ lookup_t *new_lookup(const char *qname, dns_record_type type)
     hashmapPut(context.map, &lookup->key, lookup);
     if(errno != 0)
     {
-        log_msg("Error putting lookup into hashmap: %s\n", strerror(errno));
+        log_msg(LOG_ERROR, "Error putting lookup into hashmap: %s\n", strerror(errno));
         abort();
     }
 
@@ -756,6 +759,8 @@ void tcp_connected(socket_info_t *socket_info)
     lookup_t *lookup = socket_info->data;
     int tcp_socket = socket_info->descriptor;
 
+    log_msg(LOG_DEBUG, "TCP connected (%s).\n", dns_name2str(&lookup->key.name));
+
     timeout_reset(lookup);
 
     uint16_t qlen = dns_question_create_from_name(packet_buffer + 2, &lookup->key.name, lookup->key.type,
@@ -771,7 +776,7 @@ void tcp_connected(socket_info_t *socket_info)
 
     if(write(tcp_socket, packet_buffer, qlen + 2) < qlen + 2)
     {
-        fprintf(stderr, "TCP written too few bytes.\n");
+        log_msg(LOG_ERROR, "TCP written too few bytes for qname %s.\n", dns_name2str(&lookup->key.name));
     }
     shutdown(tcp_socket, SHUT_WR);
 }
@@ -796,7 +801,7 @@ void tcp_connect(lookup_t *lookup)
     int tcp_socket = socket(lookup->resolver->address.ss_family, SOCK_STREAM, 0);
     if(tcp_socket < 0)
     {
-        log_msg("Failed to create TCP socket: %s\n", strerror(errno));
+        log_msg(LOG_ERROR, "Failed to create TCP socket: %s\n", strerror(errno));
         return;
     }
 
@@ -813,16 +818,20 @@ void tcp_connect(lookup_t *lookup)
             srcrand_random_addr(&src_addr);
             if(bind(tcp_socket, &src_addr, sizeof(src_addr)) != 0)
             {
-                log_msg("Failed to bind TCP socket: %s\n", strerror(errno));
+                log_msg(LOG_ERROR, "Failed to bind TCP socket: %s\n", strerror(errno));
             }
         }
         else
         {
-            log_msg("Failed to set FREEBIND option on TCP socket: %s\n", strerror(errno));
+            log_msg(LOG_ERROR, "Failed to set FREEBIND option on TCP socket: %s\n", strerror(errno));
         }
     }
 
     connect(tcp_socket, (struct sockaddr*)&lookup->resolver->address, sockaddr_storage_size(&lookup->resolver->address));
+
+    log_msg(LOG_DEBUG, "TCP connect for %s.\n", dns_name2str(&lookup->key.name));
+
+    timeout_reset(lookup);
 
     bzero(&lookup->tcp_socket, sizeof(lookup->tcp_socket));
     lookup->tcp_socket.descriptor = tcp_socket;
@@ -922,7 +931,7 @@ void send_query(lookup_t *lookup)
     {
         if(errno != EAGAIN && errno != EWOULDBLOCK)
         {
-            log_msg("Error sending on FD %d for query %s: %s\n", lookup->socket->descriptor, dns_name2str(&lookup->key.name), strerror(errno));
+            log_msg(LOG_ERROR, "Error sending on FD %d for query %s: %s\n", lookup->socket->descriptor, dns_name2str(&lookup->key.name), strerror(errno));
         }
     }
 }
@@ -970,7 +979,7 @@ void send_stats()
 
     if(write(context.sockets.write_pipe.descriptor, &stats_msg, sizeof(stats_msg)) != sizeof(stats_msg))
     {
-        log_msg("Could not send stats atomically.\n");
+        log_msg(LOG_ERROR, "Could not send stats atomically.\n");
     }
 }
 
@@ -1224,6 +1233,8 @@ void lookup_done(lookup_t *lookup)
     tcp_close(lookup);
     tcp_cleanup(lookup);
 
+    timed_ring_remove(&context.ring, lookup->ring_entry);
+
     hashmapRemove(context.map, &lookup->key);
 
     // Return lookup to pool.
@@ -1274,7 +1285,7 @@ void ring_timeout(void *param)
     retry(lookup, LOOKUP_FAILURE_TIMEOUT);
 }
 
-void do_read(uint8_t *offset, size_t len, struct sockaddr_storage *recvaddr)
+void do_read(uint8_t *offset, size_t len, struct sockaddr_storage *recvaddr, int protocol)
 {
     static dns_pkt_t packet;
     static uint8_t *parse_offset;
@@ -1289,7 +1300,7 @@ void do_read(uint8_t *offset, size_t len, struct sockaddr_storage *recvaddr)
         resolver = hashmapGet(context.resolver_map, recvaddr);
         if(resolver == NULL)
         {
-            //log_msg("Fake/NAT reply from %s\n", sockaddr2str(recvaddr));
+            //log_msg(LOG_ERROR, "Fake/NAT reply from %s\n", sockaddr2str(recvaddr));
             return;
         }
     }
@@ -1315,6 +1326,12 @@ void do_read(uint8_t *offset, size_t len, struct sockaddr_storage *recvaddr)
         return;
     }
 
+    if(protocol == IPPROTO_UDP && lookup->use_tcp)
+    {
+        // We have already switched to TCP. Do not consider older UDP replies anymore.
+        return;
+    }
+
     timed_ring_remove(&context.ring, lookup->ring_entry); // Clear timeout trigger
 
     // Check whether we want to retry resending the packet
@@ -1325,8 +1342,10 @@ void do_read(uint8_t *offset, size_t len, struct sockaddr_storage *recvaddr)
     }
     else
     {
+        // The DNS truncated bit is set, which means that we should switch to TCP.
         if(packet.head.header.tc && context.cmd_args.tcp_enabled)
         {
+            log_msg(LOG_DEBUG, "Truncation. Switching %s to TCP\n", dns_name2str(&lookup->key.name));
             lookup->use_tcp = true;
             retry(lookup, LOOKUP_FAILURE_NOFAILURE);
             return;
@@ -1572,12 +1591,14 @@ void tcp_can_read(socket_info_t *socket_info)
     lookup_t *lookup = socket_info->data;
     int tcp_socket = socket_info->descriptor;
     ssize_t numread = read(tcp_socket, lookup->tcp_state.buffer + lookup->tcp_state.received, 0x10001 - lookup->tcp_state.received);
-    if(numread < 0)
+    if(numread <= 0)
     {
         return;
     }
 
     timeout_reset(lookup);
+
+    log_msg(LOG_DEBUG, "Read TCP %zu data for %s. Received: %zu\n", numread, dns_name2str(&lookup->key.name), lookup->tcp_state.received);
 
     lookup->tcp_state.received += numread;
     if(lookup->tcp_state.received < 2)
@@ -1587,7 +1608,7 @@ void tcp_can_read(socket_info_t *socket_info)
     uint16_t dns_len = htons(*((uint16_t*)lookup->tcp_state.buffer));
     if(lookup->tcp_state.received >= dns_len + 2)
     {
-        do_read(lookup->tcp_state.buffer + 2, dns_len, &lookup->resolver->address);
+        do_read(lookup->tcp_state.buffer + 2, dns_len, &lookup->resolver->address, IPPROTO_TCP);
     }
 }
 
@@ -1677,7 +1698,7 @@ void can_read(socket_info_t *info)
     {
         return;
     }
-    do_read(payload_buf, (size_t)num_received, &recvaddr);
+    do_read(payload_buf, (size_t)num_received, &recvaddr, IPPROTO_UDP);
     auto_concurrency_handle(NULL);
 }
 
@@ -1767,12 +1788,12 @@ void privilege_drop()
         {
             if (!context.cmd_args.quiet)
             {
-                log_msg("Privileges have been dropped to \"%s:%s\" for security reasons.\n", username, groupname);
+                log_msg(LOG_INFO, "Privileges have been dropped to \"%s:%s\" for security reasons.\n", username, groupname);
             }
         }
         else
         {
-            log_msg("Privileges could not be dropped to \"%s:%s\".\n"
+            log_msg(LOG_ERROR, "Privileges could not be dropped to \"%s:%s\".\n"
                 "For security reasons, this program will only run as root user when supplied with --root, "
                 "which is not recommended.\n"
                 "It is better practice to run this program as a different user.\n", username, groupname);
@@ -1783,7 +1804,7 @@ void privilege_drop()
     {
         if (!context.cmd_args.quiet)
         {
-            log_msg("[WARNING] Privileges were not dropped. This is not recommended.\n");
+            log_msg(LOG_WARN, "[WARNING] Privileges were not dropped. This is not recommended.\n");
         }
     }
 }
@@ -1796,7 +1817,7 @@ void pcap_setup()
     {
         goto pcap_error;
     }
-    log_msg("Default pcap device: %s", context.pcap_dev);
+    log_msg(LOG_ERROR, "Default pcap device: %s", context.pcap_dev);
 
 
     char mac_filter[sizeof("ether dst ") - 1 + MAC_READABLE_BUFLEN];
@@ -1805,10 +1826,10 @@ void pcap_setup()
 
     if(get_iface_hw_addr_readable(context.pcap_dev, mac_readable) != 0)
     {
-        log_msg("\nFailed to determine the hardware address of the device.\n");
+        log_msg(LOG_ERROR, "\nFailed to determine the hardware address of the device.\n");
         goto pcap_error_noprint;
     }
-    log_msg(", address: %s\n", mac_readable);
+    log_msg(LOG_ERROR, ", address: %s\n", mac_readable);
 
 
     context.pcap = pcap_create(context.pcap_dev, context.pcap_error);
@@ -1835,19 +1856,19 @@ void pcap_setup()
     int activation_status = pcap_activate(context.pcap);
     if(activation_status != 0)
     {
-        log_msg("Error during pcap activation: %s\n", pcap_statustostr(activation_status));
+        log_msg(LOG_ERROR, "Error during pcap activation: %s\n", pcap_statustostr(activation_status));
         goto pcap_error_noprint;
     }
 
     if(pcap_compile(context.pcap, &context.pcap_filter, mac_filter, 0, PCAP_NETMASK_UNKNOWN) != 0)
     {
-        log_msg("Error during pcap filter compilation: %s\n", pcap_geterr(context.pcap));
+        log_msg(LOG_ERROR, "Error during pcap filter compilation: %s\n", pcap_geterr(context.pcap));
         goto pcap_error_noprint;
     }
 
     if(pcap_setfilter(context.pcap, &context.pcap_filter) != 0)
     {
-        log_msg("Error setting pcap filter: %s\n", pcap_geterr(context.pcap));
+        log_msg(LOG_ERROR, "Error setting pcap filter: %s\n", pcap_geterr(context.pcap));
         goto pcap_error_noprint;
     }
 
@@ -1863,14 +1884,14 @@ void pcap_setup()
     ev.events = EPOLLIN;
     if (epoll_ctl(context.epollfd, EPOLL_CTL_ADD, context.pcap_info.descriptor, &ev) != 0)
     {
-        log_msg("Failed to add epoll event: %s\n", strerror(errno));
+        log_msg(LOG_ERROR, "Failed to add epoll event: %s\n", strerror(errno));
         clean_exit(EXIT_FAILURE);
     }
 #endif
     return;
 
 pcap_error:
-    log_msg("Error during pcap setup: %s\n", context.pcap_error);
+    log_msg(LOG_ERROR, "Error during pcap setup: %s\n", context.pcap_error);
 pcap_error_noprint:
     cleanup();
     clean_exit(EXIT_FAILURE);
@@ -1891,7 +1912,7 @@ void init_pipes()
     {
         if(pipe(context.sockets.pipes + i * 2) != 0)
         {
-            log_msg("Pipe failed: %s\n", strerror(errno));
+            log_msg(LOG_ERROR, "Pipe failed: %s\n", strerror(errno));
             clean_exit(EXIT_FAILURE);
         }
     }
@@ -1927,7 +1948,7 @@ void setup_pipes()
             ev.events = EPOLLIN;
             if (epoll_ctl(context.epollfd, EPOLL_CTL_ADD, context.sockets.master_pipes_read[i].descriptor, &ev) != 0)
             {
-                log_msg("Failed to add epoll event: %s\n", strerror(errno));
+                log_msg(LOG_ERROR, "Failed to add epoll event: %s\n", strerror(errno));
                 clean_exit(EXIT_FAILURE);
             }
 #endif
@@ -1960,7 +1981,7 @@ void read_control_message(socket_info_t *socket_info)
     ssize_t read_result = read(socket_info->descriptor, context.stat_messages + process, sizeof(stats_exchange_t));
     if(read_result > 0 && read_result < sizeof(stats_exchange_t))
     {
-        log_msg("Atomic read failed: Read %ld bytes.\n", read_result);
+        log_msg(LOG_ERROR, "Atomic read failed: Read %ld bytes.\n", read_result);
     }
     if(!context.done[process] && context.stat_messages[process].done)
     {
@@ -1987,20 +2008,20 @@ void run()
 
     if(!urandom_init())
     {
-        log_msg("Failed to open /dev/urandom: %s\n", strerror(errno));
+        log_msg(LOG_ERROR, "Failed to open /dev/urandom: %s\n", strerror(errno));
         clean_exit(EXIT_FAILURE);
     }
 
     if(context.srcrand.enabled && (context.cmd_args.bind_addrs4.count > 0 || context.cmd_args.bind_addrs6.count > 0))
     {
-        log_msg("--bindto and --rand-src-ipv6 cannot be used together\n");
+        log_msg(LOG_ERROR, "--bindto and --rand-src-ipv6 cannot be used together\n");
         clean_exit(EXIT_FAILURE);
     }
 
     context.map = hashmapCreate(context.cmd_args.hashmap_size, hash_lookup_key, cmp_lookup);
     if(context.map == NULL)
     {
-        log_msg("Failed to create hashmap.\n");
+        log_msg(LOG_ERROR, "Failed to create hashmap.\n");
         clean_exit(EXIT_FAILURE);
     }
 
@@ -2054,7 +2075,7 @@ void run()
         }
         if(!context.outfile)
         {
-            log_msg("Failed to open output file: %s\n", strerror(errno));
+            log_msg(LOG_ERROR, "Failed to open output file: %s\n", strerror(errno));
             clean_exit(EXIT_FAILURE);
         }
     }
@@ -2062,7 +2083,7 @@ void run()
     {
         if(context.cmd_args.num_processes > 1)
         {
-            log_msg("Multiprocessing is currently only supported through the -w parameter.\n");
+            log_msg(LOG_ERROR, "Multiprocessing is currently only supported through the -w parameter.\n");
             clean_exit(EXIT_FAILURE);
         }
     }
@@ -2072,7 +2093,7 @@ void run()
         context.domainfile = fopen(context.cmd_args.domains, "r");
         if (context.domainfile == NULL)
         {
-            log_msg("Failed to open domain file \"%s\".\n", context.cmd_args.domains);
+            log_msg(LOG_ERROR, "Failed to open domain file \"%s\".\n", context.cmd_args.domains);
             clean_exit(EXIT_FAILURE);
         }
     }
@@ -2125,7 +2146,7 @@ void run()
             int ready = epoll_wait(context.epollfd, pevents, sizeof(pevents) / sizeof(pevents[0]), 1);
             if (ready < 0)
             {
-                log_msg("Epoll failure: %s\n", strerror(errno));
+                log_msg(LOG_ERROR, "Epoll failure: %s\n", strerror(errno));
             }
             else if (ready == 0) // Epoll timeout
             {
@@ -2217,7 +2238,7 @@ const char * get_status_format_string(char *arg) {
         if (!strcmp(arg, status_fmt_map[i].name))
             return status_fmt_map[i].status_fmt;
     }
-    log_msg("Invalid status format specified.\n");
+    log_msg(LOG_ERROR, "Invalid status format specified.\n");
     clean_exit(EXIT_FAILURE);
     return NULL;
 }
@@ -2226,7 +2247,7 @@ void use_stdin()
 {
     if (!context.cmd_args.quiet)
     {
-        log_msg("Reading domain list from stdin.\n");
+        log_msg(LOG_ERROR, "Reading domain list from stdin.\n");
     }
     context.domainfile = stdin;
 }
@@ -2316,7 +2337,7 @@ void parse_cmd(int argc, char **argv)
             }
             else
             {
-                log_msg("Resolvers may only be supplied once.\n");
+                log_msg(LOG_ERROR, "Resolvers may only be supplied once.\n");
                 clean_exit(EXIT_FAILURE);
             }
         }
@@ -2340,7 +2361,7 @@ void parse_cmd(int argc, char **argv)
             }
             else
             {
-                log_msg("Invalid retry code: %s.\n", argv[i]);
+                log_msg(LOG_ERROR, "Invalid retry code: %s.\n", argv[i]);
                 clean_exit(EXIT_FAILURE);
             }
         }
@@ -2351,7 +2372,7 @@ void parse_cmd(int argc, char **argv)
 
             filter_mode_t filter_mode = strcmp(argv[i], "--ignore") == 0 ? FILTER_NEGATIVE : FILTER_POSITIVE;
             if(context.cmd_args.filter_mode != filter_mode && context.cmd_args.filter_mode != FILTER_DISABLED) {
-                log_msg("Cannot combine --filter and --ignore.\n");
+                log_msg(LOG_ERROR, "Cannot combine --filter and --ignore.\n");
                 clean_exit(EXIT_FAILURE);
             }
 
@@ -2362,7 +2383,7 @@ void parse_cmd(int argc, char **argv)
             }
             else
             {
-                log_msg("Invalid filter/ignore code: %s.\n", argv[i]);
+                log_msg(LOG_ERROR, "Invalid filter/ignore code: %s.\n", argv[i]);
                 clean_exit(EXIT_FAILURE);
             }
         }
@@ -2373,7 +2394,7 @@ void parse_cmd(int argc, char **argv)
             if (!str_to_addr(argv[++i], 0, addr))
             {
                 free(addr);
-                log_msg("Invalid address for socket binding: %s\n", argv[i]);
+                log_msg(LOG_ERROR, "Invalid address for socket binding: %s\n", argv[i]);
                 clean_exit(EXIT_FAILURE);
 
             }
@@ -2386,7 +2407,7 @@ void parse_cmd(int argc, char **argv)
             expect_arg(i);
             if(context.srcrand.enabled)
             {
-                log_msg("--rand-src-ipv6 can only be used once\n");
+                log_msg(LOG_ERROR, "--rand-src-ipv6 can only be used once\n");
                 clean_exit(EXIT_FAILURE);
             }
             char *save_ptr = argv[++i];
@@ -2397,14 +2418,14 @@ void parse_cmd(int argc, char **argv)
             }
             if(tok == NULL || inet_pton(AF_INET6, argv[i], &((struct sockaddr_in6*)&context.srcrand.src_range)->sin6_addr) != 1)
             {
-                log_msg("Invalid --rand-src-ipv6\n");
+                log_msg(LOG_ERROR, "Invalid --rand-src-ipv6\n");
                 clean_exit(EXIT_FAILURE);
             }
             struct sockaddr_in6* addr = (struct sockaddr_in6*)&context.srcrand.src_range;
             int prefix = atoi(tok);
             if(prefix <= 0 || prefix > 128)
             {
-                log_msg("Invalid --rand-src-ipv6\n");
+                log_msg(LOG_ERROR, "Invalid --rand-src-ipv6\n");
                 clean_exit(EXIT_FAILURE);
             }
             context.srcrand.enabled = true;
@@ -2429,7 +2450,7 @@ void parse_cmd(int argc, char **argv)
                 context.logfile = fopen(filename, "w");
                 if(!context.logfile)
                 {
-                    log_msg("Failed to open log file: %s\n", strerror(errno));
+                    log_msg(LOG_ERROR, "Failed to open log file: %s\n", strerror(errno));
                     clean_exit(EXIT_FAILURE);
                 }
             }
@@ -2440,12 +2461,12 @@ void parse_cmd(int argc, char **argv)
             dns_record_type rtype = dns_str_to_record_type(argv[++i]);
             if (rtype == DNS_REC_INVALID)
             {
-                log_msg("Unsupported record type: %s\n", argv[i]);
+                log_msg(LOG_ERROR, "Unsupported record type: %s\n", argv[i]);
                 clean_exit(EXIT_FAILURE);
             }
             if (cmd_resolve_type(rtype))
             {
-                log_msg("Duplicate record type (%s) unsupported\n", argv[i]);
+                log_msg(LOG_ERROR, "Duplicate record type (%s) unsupported\n", argv[i]);
                 clean_exit(EXIT_FAILURE);
             }
 
@@ -2495,7 +2516,7 @@ void parse_cmd(int argc, char **argv)
                                 context.format.list_write_zero_answers = true;
                                 break;
                             default:
-                                log_msg("Unrecognized output option: %c\n", *output_option);
+                                log_msg(LOG_ERROR, "Unrecognized output option: %c\n", *output_option);
                                 clean_exit(EXIT_FAILURE);
                         }
                     }
@@ -2515,7 +2536,7 @@ void parse_cmd(int argc, char **argv)
                                 context.format.write_exhausted_tries = true;
                                 break;
                             default:
-                                log_msg("Unrecognized output option: %c\n", *output_option);
+                                log_msg(LOG_ERROR, "Unrecognized output option: %c\n", *output_option);
                                 clean_exit(EXIT_FAILURE);
                         }
                     }
@@ -2568,7 +2589,7 @@ void parse_cmd(int argc, char **argv)
                                 context.format.include_meta = true;
                                 break;
                             default:
-                                log_msg("Unrecognized output option: %c\n", *output_option);
+                                log_msg(LOG_ERROR, "Unrecognized output option: %c\n", *output_option);
                                 clean_exit(EXIT_FAILURE);
                         }
                     }
@@ -2585,7 +2606,7 @@ void parse_cmd(int argc, char **argv)
                     break;
 
                 default:
-                    log_msg("Unrecognized output format.\n");
+                    log_msg(LOG_ERROR, "Unrecognized output format.\n");
                     clean_exit(EXIT_FAILURE);
             }
         }
@@ -2630,13 +2651,13 @@ void parse_cmd(int argc, char **argv)
             if(context.cmd_args.num_processes == 0)
             {
 #ifndef HAVE_SYSINFO
-                    log_msg("No support for detecting the number of cores automatically.\n");
+                    log_msg(LOG_ERROR, "No support for detecting the number of cores automatically.\n");
                     clean_exit(EXIT_FAILURE);
 #else
                 int cores = get_nprocs_conf();
                 if(cores <= 0)
                 {
-                    log_msg("Failed to determine number of processor cores.\n");
+                    log_msg(LOG_ERROR, "Failed to determine number of processor cores.\n");
                     clean_exit(EXIT_FAILURE);
                 }
                 context.cmd_args.num_processes = (size_t)cores;
@@ -2692,7 +2713,7 @@ void parse_cmd(int argc, char **argv)
                     context.domainfile = fopen(context.cmd_args.domains, "r");
                     if (context.domainfile == NULL)
                     {
-                        log_msg("Failed to open domain file \"%s\".\n", argv[i]);
+                        log_msg(LOG_ERROR, "Failed to open domain file \"%s\".\n", argv[i]);
                         clean_exit(EXIT_FAILURE);
                     }
                     if(fseek(context.domainfile, 0, SEEK_END) != 0)
@@ -2715,7 +2736,7 @@ void parse_cmd(int argc, char **argv)
             }
             else
             {
-                log_msg("The domain list may only be supplied once.\n");
+                log_msg(LOG_ERROR, "The domain list may only be supplied once.\n");
                 clean_exit(EXIT_FAILURE);
             }
         }
@@ -2728,7 +2749,7 @@ void parse_cmd(int argc, char **argv)
     }
     if (context.cmd_args.resolvers == NULL)
     {
-        log_msg("Resolvers are required to be supplied.\n");
+        log_msg(LOG_ERROR, "Resolvers are required to be supplied.\n");
         clean_exit(EXIT_FAILURE);
     }
     if (!domain_param)
@@ -2739,14 +2760,14 @@ void parse_cmd(int argc, char **argv)
         }
         else
         {
-            log_msg("The domain list is required to be supplied.\n");
+            log_msg(LOG_ERROR, "The domain list is required to be supplied.\n");
             clean_exit(EXIT_FAILURE);
         }
     }
 
     if(context.domainfile == stdin && context.cmd_args.num_processes > 1)
     {
-        log_msg("In order to use multiprocessing, the domain list needs to be supplied as file.\n");
+        log_msg(LOG_ERROR, "In order to use multiprocessing, the domain list needs to be supplied as file.\n");
         clean_exit(EXIT_FAILURE);
     }
 }
