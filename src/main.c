@@ -714,6 +714,11 @@ lookup_t *new_lookup(const char *qname, dns_record_type type)
         abort();
     }
 
+    if(context.cmd_args.tcp_only)
+    {
+        lookup->use_tcp = true;
+    }
+
     context.lookup_index++;
     context.stats.timeouts[0]++;
     if(context.lookup_index >= context.cmd_args.hashmap_size)
@@ -2319,6 +2324,11 @@ void parse_cmd(int argc, char **argv)
         else if (strcmp(argv[i], "--tcp-enabled") == 0)
         {
             context.cmd_args.tcp_enabled = true;
+        }
+        else if (strcmp(argv[i], "--tcp-only") == 0)
+        {
+            context.cmd_args.tcp_enabled = true;
+            context.cmd_args.tcp_only = true;
         }
         else if (strcmp(argv[i], "--busypoll") == 0 || strcmp(argv[i], "--busy-poll") == 0)
         {

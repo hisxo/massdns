@@ -216,6 +216,7 @@ typedef struct
         bool extended_input;
         bool auto_concurrency;
         bool tcp_enabled;
+        bool tcp_only;
     } cmd_args;
 
     struct
